@@ -14,7 +14,7 @@ jobs:
         include:
           - os: windows-latest
             label: Windows
-            nuitka-args: --windows-console-mode=attach
+            nuitka-args: --windows-console-mode=disable
             artifact-dir: dist/main.dist
             flet-artifact: flet-windows.zip
 
