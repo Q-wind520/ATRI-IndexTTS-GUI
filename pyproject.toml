@@ -2,7 +2,7 @@
 name = "atri-index-tts-gui"
 version = "1.0.0"
 description = "ATRI-IndexTTS GUI 前端"
-readme = "AGENTS.md"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "flet>=0.25.0",
@@ -10,6 +10,9 @@ dependencies = [
     "playsound3>=3.3.0",
     "python-dotenv>=1.0.0",
 ]
+
+[project.scripts]
+build-gui = "build:main"
 
 [tool.uv]
 package = false

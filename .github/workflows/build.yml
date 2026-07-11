@@ -14,17 +14,14 @@ jobs:
           - os: windows-latest
             label: Windows
             nuitka-args: --windows-console-mode=disable
-            ext: .exe
 
           - os: macos-latest
             label: macOS
             nuitka-args: --macos-create-app-bundle
-            ext: .app
 
           - os: ubuntu-latest
             label: Linux
             nuitka-args: ""
-            ext: .bin
 
     runs-on: ${{ matrix.os }}
 
@@ -41,6 +38,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc python3-dev tk-dev libx11-dev
+
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install python-tk@3.12 || true
 
       - name: Install dependencies
         run: |
@@ -64,13 +66,8 @@ jobs:
         run: |
           Compress-Archive -Path dist/main.dist -DestinationPath ATRI-IndexTTS-${{ matrix.label }}.zip
 
-      - name: Package artifact (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          cd dist && zip -r ../ATRI-IndexTTS-${{ matrix.label }}.zip main.dist
-
-      - name: Package artifact (Linux)
-        if: runner.os == 'Linux'
+      - name: Package artifact (macOS / Linux)
+        if: runner.os != 'Windows'
         run: |
           cd dist && zip -r ../ATRI-IndexTTS-${{ matrix.label }}.zip main.dist
 

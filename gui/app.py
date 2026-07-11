@@ -1,6 +1,9 @@
 import asyncio
 import logging
 import os
+import platform
+import subprocess
+import sys
 import time
 from playsound3 import playsound
 from pathlib import Path
@@ -9,7 +12,6 @@ from tkinter import filedialog
 
 import flet as ft
 from dotenv import load_dotenv
-from tkinter import filedialog
 
 from gui.api_client import (  # noqa: F401
     AstraFlowClient,
@@ -604,7 +606,13 @@ class TtsApp:
         out_dir = Path(self._txt_output.value.strip() or "temp/output")
         if not out_dir.exists():
             out_dir.mkdir(parents=True, exist_ok=True)
-        os.startfile(str(out_dir))
+        _p = str(out_dir)
+        if sys.platform == "win32":
+            os.startfile(_p)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", _p])
+        else:
+            subprocess.run(["xdg-open", _p])
 
     # ── Config dialog ─────────────────────────────────────────
 
