@@ -9,19 +9,23 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
             label: Windows
-            nuitka-args: --windows-console-mode=disable
+            nuitka-args: --windows-console-mode=attach --include-package=flet
+            artifact-dir: dist/main.dist
 
           - os: macos-latest
             label: macOS
-            nuitka-args: --macos-create-app-bundle
+            nuitka-args: --macos-create-app-bundle --include-package=flet
+            artifact-dir: dist/main.app
 
           - os: ubuntu-latest
             label: Linux
-            nuitka-args: ""
+            nuitka-args: --include-package=flet
+            artifact-dir: dist/main.dist
 
     runs-on: ${{ matrix.os }}
 
@@ -41,6 +45,8 @@ jobs:
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
         run: |
           brew install python-tk@3.12 || true
 
@@ -62,23 +68,8 @@ jobs:
             --assume-yes-for-downloads \
             main.py
 
-      - name: Package artifact (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          Compress-Archive -Path dist/main.dist -DestinationPath ATRI-IndexTTS-${{ matrix.label }}.zip
-
-      - name: Package artifact (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          cd dist && zip -r ../ATRI-IndexTTS-${{ matrix.label }}.zip main.app
-
-      - name: Package artifact (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          cd dist && zip -r ../ATRI-IndexTTS-${{ matrix.label }}.zip main.dist
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ATRI-IndexTTS-${{ matrix.label }}
-          path: ATRI-IndexTTS-${{ matrix.label }}.zip
+          path: ${{ matrix.artifact-dir }}

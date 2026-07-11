@@ -12,7 +12,7 @@ NUITKA_ARGS = [
     sys.executable, "-m", "nuitka",
     "--standalone",
     "--enable-plugin=tk-inter",
-    "--include-package=gui,httpx,playsound3,dotenv",
+    "--include-package=gui,httpx,playsound3,dotenv,flet",
     "--include-package-data=flet",
     "--include-data-dir=gui=gui",
     "--output-dir=dist",
