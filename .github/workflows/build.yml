@@ -66,8 +66,13 @@ jobs:
         run: |
           Compress-Archive -Path dist/main.dist -DestinationPath ATRI-IndexTTS-${{ matrix.label }}.zip
 
-      - name: Package artifact (macOS / Linux)
-        if: runner.os != 'Windows'
+      - name: Package artifact (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist && zip -r ../ATRI-IndexTTS-${{ matrix.label }}.zip main.app
+
+      - name: Package artifact (Linux)
+        if: runner.os == 'Linux'
         run: |
           cd dist && zip -r ../ATRI-IndexTTS-${{ matrix.label }}.zip main.dist
 
