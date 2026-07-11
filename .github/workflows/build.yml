@@ -1,0 +1,81 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+            nuitka-args: --windows-console-mode=disable
+            ext: .exe
+
+          - os: macos-latest
+            label: macOS
+            nuitka-args: --macos-create-app-bundle
+            ext: .app
+
+          - os: ubuntu-latest
+            label: Linux
+            nuitka-args: ""
+            ext: .bin
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc python3-dev tk-dev libx11-dev
+
+      - name: Install dependencies
+        run: |
+          pip install httpx flet playsound3 python-dotenv nuitka
+
+      - name: Build with Nuitka
+        run: |
+          python -m nuitka --standalone \
+            --enable-plugin=tk-inter \
+            --include-package=gui,httpx,playsound3,dotenv \
+            --include-package-data=flet \
+            --include-data-dir=gui=gui \
+            --output-dir=dist \
+            --output-filename=ATRI-IndexTTS \
+            ${{ matrix.nuitka-args }} \
+            --assume-yes-for-downloads \
+            main.py
+
+      - name: Package artifact (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Compress-Archive -Path dist/main.dist -DestinationPath ATRI-IndexTTS-${{ matrix.label }}.zip
+
+      - name: Package artifact (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist && zip -r ../ATRI-IndexTTS-${{ matrix.label }}.zip main.dist
+
+      - name: Package artifact (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd dist && zip -r ../ATRI-IndexTTS-${{ matrix.label }}.zip main.dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ATRI-IndexTTS-${{ matrix.label }}
+          path: ATRI-IndexTTS-${{ matrix.label }}.zip
