@@ -29,12 +29,30 @@ EMOTION_DIMS: list[tuple[str, str]] = [
 ]
 
 
+def _get_config_dir() -> Path:
+    """Return a user-writable config directory for ViewIndexTTS."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    config_dir = base / "ViewIndexTTS"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir
+
+
+def _get_env_path() -> Path:
+    """Return the path to the .env config file."""
+    return _get_config_dir() / ".env"
+
+
 class TtsApp:
     def __init__(self, page: ft.Page):
         self.page = page
 
         # Load .env and API key
-        _env = Path(__file__).resolve().parent.parent / ".env"
+        _env = _get_env_path()
         if _env.exists():
             load_dotenv(_env)
         self._api_key = os.environ.get("MODELVERSE_API_KEY", "")
@@ -644,7 +662,7 @@ class TtsApp:
                 self._api_key = new_key
                 os.environ["MODELVERSE_API_KEY"] = new_key
                 # Write to .env file
-                _env = Path(__file__).resolve().parent.parent / ".env"
+                _env = _get_env_path()
                 lines: list[str] = _env.read_text("utf-8").splitlines() if _env.exists() else []
                 new_lines: list[str] = []
                 found = False
