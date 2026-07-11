@@ -68,7 +68,7 @@ class TtsApp:
 
     def _build_ui(self):
         p = self.page
-        p.title = "ATRI-IndexTTS 语音合成"
+        p.title = "ViewIndexTTS 语音合成"
         p.padding = 0
         p.spacing = 0
         p.window_width = 800
@@ -271,7 +271,7 @@ class TtsApp:
                 ft.Container(
                     content=ft.Column([
                         ft.Row([
-                            ft.Text("ATRI-IndexTTS", size=22, weight=ft.FontWeight.BOLD),
+                            ft.Text("ViewIndexTTS", size=22, weight=ft.FontWeight.BOLD),
                             ft.Container(expand=True),
                             ft.IconButton(
                                 icon=ft.Icons.DARK_MODE, tooltip="切换深色模式",

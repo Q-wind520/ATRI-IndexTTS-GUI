@@ -1,7 +1,7 @@
 [project]
-name = "atri-index-tts-gui"
-version = "1.0.0"
-description = "ATRI-IndexTTS GUI 前端"
+name = "view-indextts"
+version = "1.1.0"
+description = "ViewIndexTTS — IndexTTS 可视化桌面客户端"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

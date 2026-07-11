@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://via.placeholder.com/120x120/6366f1/ffffff?text=ATRI" width="120" height="120" alt="ATRI-IndexTTS">
+  <img src="https://via.placeholder.com/120x120/6366f1/ffffff?text=View" width="120" height="120" alt="ViewIndexTTS">
 </p>
 
 <p align="center">
@@ -11,10 +11,10 @@
   <img src="https://img.shields.io/badge/License-MIT-6366f1" alt="MIT">
 </p>
 
-<h1 align="center">ATRI-IndexTTS GUI</h1>
+<h1 align="center">ViewIndexTTS</h1>
 
 <p align="center">
-  基于 <b>Flet</b> 构建的 <b>IndexTTS-2</b> 桌面语音合成客户端<br>
+  IndexTTS-2 模型的可视化桌面客户端<br>
   通过 <b>AstraFlow API</b> 提供中英文高质量语音合成，支持情感控制与自定义音色
 </p>
 
@@ -22,7 +22,7 @@
 
 ## 简介
 
-ATRI-IndexTTS GUI 是 [IndexTTS-2](https://github.com/IndexTeam/IndexTTS) 模型的桌面客户端，通过 [AstraFlow](https://astraflow.ucloud.cn/) 官方托管 API 提供语音合成服务。无需配置本地模型环境，输入文本即可生成自然流畅的语音。
+ViewIndexTTS 是 [IndexTTS-2](https://github.com/IndexTeam/IndexTTS) 模型的可视化桌面客户端，通过 [AstraFlow](https://astraflow.ucloud.cn/) 官方托管 API 提供语音合成服务。无需配置本地模型环境，输入文本即可生成自然流畅的语音。
 
 支持 **9 种内置音色**、**4 种情感控制模式**（8 维情感向量 / 文本描述 / 音频参考 / 随机化）、**自定义音色克隆**，以及语速、音量、采样率等精细调节。
 
@@ -65,8 +65,8 @@ ATRI-IndexTTS GUI 是 [IndexTTS-2](https://github.com/IndexTeam/IndexTTS) 模型
 
 ```powershell
 # 1. 克隆仓库
-git clone https://github.com/your-username/ATRI-IndexTTS-GUI.git
-cd ATRI-IndexTTS-GUI
+git clone https://github.com/Q-wind520/ViewIndexTTS.git
+cd ViewIndexTTS
 
 # 2. 创建虚拟环境
 python -m venv .venv
@@ -99,7 +99,7 @@ python main.py
 
 [MIT License](https://opensource.org/licenses/MIT)
 
-Copyright © 2026 ATRI-IndexTTS-GUI Contributors
+Copyright © 2026 ViewIndexTTS Contributors
 
 特此授予任何人免费获取本软件及相关文档文件副本的权利，不受限制地处理本软件，包括但不限于使用、复制、修改、合并、发布、分发、再许可和/或出售本软件的副本，并允许获得本软件的人这样做，但须满足以下条件：
 

@@ -1,4 +1,4 @@
-"""Nuitka build script for ATRI-IndexTTS-GUI.
+"""Nuitka build script for ViewIndexTTS.
 
 Usage:
     python build.py               # dev build (standalone folder)
@@ -25,7 +25,7 @@ NUITKA_ARGS = [
     "--include-data-dir=gui=gui",
     "--include-data-dir=flet_client=flet_client",
     "--output-dir=dist",
-    "--output-filename=ATRI-IndexTTS",
+    "--output-filename=ViewIndexTTS",
     "--assume-yes-for-downloads",
 ]
 

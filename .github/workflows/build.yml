@@ -84,7 +84,7 @@ jobs:
             --include-data-dir=gui=gui \
             ${{ matrix.flet-data-dir }} \
             --output-dir=dist \
-            --output-filename=ATRI-IndexTTS \
+            --output-filename=ViewIndexTTS \
             ${{ matrix.nuitka-args }} \
             --assume-yes-for-downloads \
             main.py
@@ -96,5 +96,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ATRI-IndexTTS-${{ matrix.label }}
+          name: ViewIndexTTS-${{ matrix.label }}
           path: ${{ matrix.artifact-dir }}
