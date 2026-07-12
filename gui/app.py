@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 from playsound3 import playsound
+from playsound3.playsound3 import Sound
 from pathlib import Path
 from threading import Thread
 from tkinter import filedialog
@@ -18,33 +19,11 @@ from gui.api_client import (  # noqa: F401
     CustomVoice,
     SynthesizeRequest,
 )
+from gui.utils import EMOTION_DIMS, get_config_dir, get_default_output_dir, get_env_path
+from gui.voice_manager import VoiceManagerDialog
 from gui.voice_presets import BUILTIN_VOICES, VOICE_LABEL_MAP  # noqa: F401
 
 logger = logging.getLogger(__name__)
-
-EMOTION_DIMS: list[tuple[str, str]] = [
-    ("Happy", "快乐"), ("Angry", "愤怒"), ("Sad", "悲伤"),
-    ("Scared", "恐惧"), ("Disgusted", "厌恶"), ("Depressed", "抑郁"),
-    ("Surprised", "惊讶"), ("Calm", "平静"),
-]
-
-
-def _get_config_dir() -> Path:
-    """Return a user-writable config directory for ViewIndexTTS."""
-    if sys.platform == "win32":
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    elif sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support"
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    config_dir = base / "ViewIndexTTS"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir
-
-
-def _get_env_path() -> Path:
-    """Return the path to the .env config file."""
-    return _get_config_dir() / ".env"
 
 
 class TtsApp:
@@ -52,7 +31,7 @@ class TtsApp:
         self.page = page
 
         # Load .env and API key
-        _env = _get_env_path()
+        _env = get_env_path()
         if _env.exists():
             load_dotenv(_env)
         self._api_key = os.environ.get("MODELVERSE_API_KEY", "")
@@ -67,7 +46,11 @@ class TtsApp:
                 self.client = None
 
         self._current_audio: str | None = None
+        self._current_sound: Sound | None = None
         self._is_playing = False
+
+        # Voice manager dialog
+        self._voice_manager: VoiceManagerDialog | None = None
 
         self._build_ui()
         self._load_data()
@@ -89,17 +72,11 @@ class TtsApp:
         p.title = "ViewIndexTTS 语音合成"
         p.padding = 0
         p.spacing = 0
-        p.window_width = 800
-        p.window_min_width = 370
+        p.window.width = 800
+        p.window.min_width = 370
 
-        p.theme = ft.Theme(
-            color_scheme=ft.ColorScheme(primary=ft.Colors.INDIGO),
-            use_material3=True,
-        )
-        p.dark_theme = ft.Theme(
-            color_scheme=ft.ColorScheme(primary=ft.Colors.INDIGO_200, outline=ft.Colors.GREY_400),
-            use_material3=True,
-        )
+        p.theme = ft.Theme(color_scheme_seed=ft.Colors.INDIGO)
+        p.dark_theme = ft.Theme(color_scheme_seed=ft.Colors.INDIGO_200)
         p.theme_mode = ft.ThemeMode.LIGHT
 
         # ---- .env warning ----
@@ -125,37 +102,15 @@ class TtsApp:
             on_click=self._open_voice_manager,
         )
 
-        # ---- Emotion ----
-        self._ck_emo = ft.Checkbox(
-            label="启用情感控制", value=False, on_change=self._on_emo_toggle,
-        )
-
-        self._dd_emo_method = ft.Dropdown(
-            label="控制方式",
-            options=[
-                ft.dropdown.Option("0", "无"),
-                ft.dropdown.Option("1", "情感音频文件"),
-                ft.dropdown.Option("2", "情感向量"),
-                ft.dropdown.Option("3", "情感文本"),
-            ],
-            value="0",
-            border=ft.InputBorder.OUTLINE,
-            expand=True,
-            visible=False,
-            on_select=self._on_emo_method_change,
-        )
-
-        # ---- Emotion: 情感文本 (method=3) ----
+        # ---- Emotion: text (tab 2) ----
         self._txt_emo_text = ft.TextField(
             label="情感文本",
-            border=ft.InputBorder.OUTLINE, expand=True, visible=False,
+            border=ft.InputBorder.OUTLINE, expand=True,
         )
-
-        # ---- Emotion: 情感向量 (method=2) ----
         self._emo_sliders: list[ft.Slider] = []
         self._emo_val_texts: list[ft.Text] = []
         self._txt_emo_vec_sum = ft.Text("合计: 0.00", size=12)
-        emo_vec_rows: list[ft.Row] = []
+        emo_vec_cells: list[ft.Control] = []
         for _i, (_en, cn) in enumerate(EMOTION_DIMS):
             s = ft.Slider(
                 min=0, max=1.2, value=0, divisions=24,
@@ -164,26 +119,51 @@ class TtsApp:
             vt = ft.Text("0.00", size=12, width=42, text_align=ft.TextAlign.END)
             self._emo_sliders.append(s)
             self._emo_val_texts.append(vt)
-            emo_vec_rows.append(ft.Row(
-                [ft.Text(cn, size=12, width=48), s, vt],
-                spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ))
-        emo_vec_rows.append(ft.Row(
-            [ft.Container(expand=True), self._txt_emo_vec_sum],
-            spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        ))
+            emo_vec_cells.append(
+                ft.Column([
+                    ft.Row([ft.Text(cn, size=12), vt], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    s,
+                ], spacing=2, col={"sm": 6}),
+            )
+        emo_vec_cells.append(
+            ft.Column([ft.Row([ft.Container(expand=True), self._txt_emo_vec_sum], spacing=4)], col={"sm": 12}),
+        )
         self._container_emo_vec = ft.Container(
-            content=ft.Column(emo_vec_rows, spacing=4), visible=False,
+            content=ft.ResponsiveRow(emo_vec_cells, spacing=4),
         )
 
-        # ---- Emotion: 情感音频文件 (method=1) ----
+        # ---- Emotion: audio (tab 0) ----
         self._txt_emo_audio_file = ft.TextField(
             label="情感音频文件路径", border=ft.InputBorder.OUTLINE,
-            expand=True, visible=False, read_only=True,
+            expand=True, read_only=True,
         )
         self._btn_emo_audio_file = ft.FilledTonalButton(
             content="选择音频文件", icon=ft.Icons.AUDIO_FILE,
-            visible=False, on_click=self._on_pick_emo_audio,
+            on_click=self._on_pick_emo_audio,
+        )
+
+        # ---- Emotion: method panels (SegmentedButton + visible toggle) ----
+        self._emo_method_index = 1  # 0=audio, 1=vector (default), 2=text
+
+        self._panel_emo_audio = ft.Container(
+            content=ft.Row([self._btn_emo_audio_file, self._txt_emo_audio_file], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            visible=False,
+        )
+        self._panel_emo_vec = self._container_emo_vec  # default visible
+        self._panel_emo_text = ft.Container(
+            content=self._txt_emo_text,
+            visible=False,
+        )
+
+        self._seg_emo_method = ft.SegmentedButton(
+            segments=[
+                ft.Segment(value="0", label="情感音频"),
+                ft.Segment(value="1", label="情感向量"),
+                ft.Segment(value="2", label="情感文本"),
+            ],
+            selected=["1"],
+            show_selected_icon=False,
+            on_change=self._on_emo_method_tab_change,
         )
 
         # ---- Emotion: shared controls ----
@@ -194,11 +174,11 @@ class TtsApp:
         )
         self._row_emo_intensity = ft.Row(
             [ft.Text("情感强度", size=14), self._sl_emo_weight, self._txt_emo_weight_val],
-            spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER, visible=False,
+            spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        self._ck_emo_random = ft.Checkbox(label="随机化情感", value=False, visible=False)
+        self._ck_emo_random = ft.Checkbox(label="随机化情感", value=False)
 
-        # ---- Audio parameters ----
+        # ---- Advanced parameters (collapsible, includes audio) ----
         self._txt_speed_val = ft.Text("1.00", size=14, width=44, text_align=ft.TextAlign.END)
         self._sl_speed = ft.Slider(
             min=0.25, max=4.0, value=1.0, divisions=75, width=140,
@@ -221,8 +201,6 @@ class TtsApp:
             border=ft.InputBorder.OUTLINE,
             width=150,
         )
-
-        # ---- Advanced parameters (collapsible) ----
         self._txt_interval_silence = ft.TextField(
             label="句间静音 (ms)", value="200",
             border=ft.InputBorder.OUTLINE, width=180,
@@ -235,6 +213,21 @@ class TtsApp:
         )
         self._container_advanced = ft.Container(
             content=ft.Column([
+                ft.ResponsiveRow([
+                    ft.Column([
+                        ft.Text("语速", size=13),
+                        ft.Row([self._sl_speed, self._txt_speed_val], spacing=4),
+                    ], col={"sm": 12, "md": 4}),
+                    ft.Column([
+                        ft.Text("音量", size=13),
+                        ft.Row([self._sl_gain, self._txt_gain_val], spacing=4),
+                    ], col={"sm": 12, "md": 4}),
+                    ft.Column([
+                        ft.Text("采样率", size=13),
+                        self._dd_sample_rate,
+                    ], col={"sm": 12, "md": 4}),
+                ], spacing=16),
+                ft.Divider(height=8),
                 ft.Row([
                     ft.Text("句间静音 (ms)", size=13, width=120),
                     self._txt_interval_silence,
@@ -252,7 +245,7 @@ class TtsApp:
 
         # ---- Output ----
         self._txt_output = ft.TextField(
-            label="输出目录", value="temp/output",
+            label="输出目录", value=str(get_default_output_dir()),
             border=ft.InputBorder.OUTLINE, expand=True,
         )
         self._btn_open_output = ft.IconButton(
@@ -269,13 +262,6 @@ class TtsApp:
         # ---- Status ----
         self._txt_status = ft.Text("", selectable=True, size=13)
 
-        # ---- Playback ----
-        self._txt_file_info = ft.Text("", size=12, color=ft.Colors.GREY_600)
-        self._btn_play = ft.FilledTonalButton(
-            content="播放", icon=ft.Icons.PLAY_ARROW,
-            on_click=self._on_play, visible=False,
-        )
-
         # ---- File list ----
         self._file_list_container = ft.Container(
             content=ft.Column([ft.Text("（暂无文件）", size=13, color=ft.Colors.GREY_500)], spacing=4),
@@ -284,9 +270,23 @@ class TtsApp:
 
         # ── Assemble ──────────────────────────────────────────
 
-        p.add(
-            ft.Column([
+        # Bottom page tabs
+        p.navigation_bar = ft.NavigationBar(
+            selected_index=0,
+            destinations=[
+                ft.NavigationBarDestination(icon=ft.Icons.TEXT_FIELDS, label="单句合成"),
+                ft.NavigationBarDestination(icon=ft.Icons.QUEUE, label="批量合成"),
+            ],
+            on_change=self._on_page_change,
+        )
+
+        # Page: 单句合成
+        self._page_single = ft.Container(
+            expand=True,
+            padding=ft.Padding(left=32, top=28, right=0, bottom=28),
+            content=ft.Column([
                 ft.Container(
+                    padding=ft.Padding(left=0, top=0, right=28, bottom=0),
                     content=ft.Column([
                         ft.Row([
                             ft.Text("ViewIndexTTS", size=22, weight=ft.FontWeight.BOLD),
@@ -302,63 +302,25 @@ class TtsApp:
                         ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                         self._txt_env_warn,
                         ft.Divider(),
-                        ft.Card(
-                            content=ft.Container(
-                                content=ft.Column([
-                                    ft.Text("必填参数", size=15, weight=ft.FontWeight.W_600),
-                                    self._txt_text,
-                                    ft.ResponsiveRow([
-                                        ft.Column([self._dd_voice], col={"sm": 12, "md": 12}),
-                                    ], spacing=12),
-                                    self._btn_manage_voices,
-                                ], spacing=12),
-                                padding=16,
-                            ),
-                        ),
-                        ft.Divider(height=8),
+                        self._txt_text,
+                        ft.ResponsiveRow([
+                            ft.Column([self._dd_voice], col={"sm": 12, "md": 12}),
+                        ], spacing=12),
+                        self._btn_manage_voices,
                         ft.Text("情感控制", size=15, weight=ft.FontWeight.W_600),
-                        self._ck_emo,
-                        self._dd_emo_method,
-                        self._txt_emo_text,
+                        self._seg_emo_method,
                         self._container_emo_vec,
-                        ft.Row([
-                            self._btn_emo_audio_file,
-                            self._txt_emo_audio_file,
-                        ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                        self._panel_emo_audio,
+                        self._panel_emo_text,
                         self._row_emo_intensity,
                         self._ck_emo_random,
-                        ft.Divider(height=8),
-                        ft.Text("音频参数", size=15, weight=ft.FontWeight.W_600),
-                        ft.ResponsiveRow([
-                            ft.Column([
-                                ft.Text("语速", size=13),
-                                ft.Row([self._sl_speed, self._txt_speed_val], spacing=4),
-                            ], col={"sm": 12, "md": 4}),
-                            ft.Column([
-                                ft.Text("音量", size=13),
-                                ft.Row([self._sl_gain, self._txt_gain_val], spacing=4),
-                            ], col={"sm": 12, "md": 4}),
-                            ft.Column([
-                                ft.Text("采样率", size=13),
-                                self._dd_sample_rate,
-                            ], col={"sm": 12, "md": 4}),
-                        ], spacing=16),
                         self._btn_advanced_toggle,
                         self._container_advanced,
-                        ft.Divider(height=8),
                         ft.ResponsiveRow([
-                            ft.Column([ft.Row([self._txt_output, self._btn_open_output], spacing=4)], col={"sm": 12, "md": 8}),
-                            ft.Column(
-                                [ft.Row([self._btn_synth, self._synth_status], spacing=8)],
-                                col={"sm": 12, "md": 4},
-                            ),
+                            ft.Column([ft.Row([self._txt_output, self._btn_open_output], spacing=4)], col={"sm": 12, "md": 12}),
                         ], spacing=12),
+                        ft.Row([self._btn_synth, self._synth_status], spacing=8),
                         self._txt_status,
-                        ft.Divider(height=8),
-                        ft.Row(
-                            [self._btn_play, self._txt_file_info],
-                            spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
                         ft.Divider(height=8),
                         ft.Row([
                             ft.Text("已生成文件", size=15, weight=ft.FontWeight.W_600),
@@ -369,12 +331,26 @@ class TtsApp:
                             ),
                         ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                         self._file_list_container,
-                        ft.Divider(),
                     ], spacing=12),
-                    padding=24,
                 ),
-            ], scroll=ft.ScrollMode.AUTO, expand=True)
+            ], scroll=ft.ScrollMode.AUTO),
         )
+
+        # Page: 批量合成 (placeholder)
+        self._page_batch = ft.Container(
+            content=ft.Column([
+                ft.Container(expand=True),
+                ft.Text("开发中，敬请期待", size=20, color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER),
+                ft.Container(expand=True),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, expand=True),
+            padding=24,
+            visible=False,
+        )
+
+        p.add(ft.Column([
+            self._page_single,
+            self._page_batch,
+        ], expand=True, spacing=0))
 
     # ── Theme toggle ──────────────────────────────────────────
 
@@ -383,6 +359,12 @@ class TtsApp:
             ft.ThemeMode.DARK if self.page.theme_mode == ft.ThemeMode.LIGHT
             else ft.ThemeMode.LIGHT
         )
+        self.page.update()
+
+    def _on_page_change(self, e):
+        idx = e.control.selected_index
+        self._page_single.visible = (idx == 0)
+        self._page_batch.visible = (idx == 1)
         self.page.update()
 
     # ── Data loading ──────────────────────────────────────────
@@ -416,7 +398,7 @@ class TtsApp:
         self.page.update()
 
     def _refresh_files(self):
-        out_dir = Path(self._txt_output.value.strip() or "temp/output")
+        out_dir = Path(self._txt_output.value.strip() or str(get_default_output_dir()))
         rows: list[ft.Row | ft.Text] = []
         if out_dir.exists():
             files = sorted(out_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -424,10 +406,13 @@ class TtsApp:
                 if f.suffix.lower() not in (".wav", ".mp3", ".flac", ".ogg"):
                     continue
                 size_kb = f.stat().st_size / 1024
+                is_current = self._is_playing and str(f) == self._current_audio
+                icon = ft.Icons.STOP if is_current else ft.Icons.PLAY_ARROW
+                tooltip = "停止" if is_current else "播放"
                 rows.append(
                     ft.Row([
                         ft.IconButton(
-                            icon=ft.Icons.PLAY_ARROW, tooltip="播放", icon_size=18,
+                            icon=icon, tooltip=tooltip, icon_size=18,
                             on_click=lambda _, path=str(f): self._play_file(path),
                         ),
                         ft.Text(f.name, size=13, expand=True),
@@ -439,34 +424,42 @@ class TtsApp:
         self._file_list_container.content = ft.Column(rows, spacing=4)
 
     def _play_file(self, path: str):
+        if self._is_playing and path == self._current_audio:
+            # Clicking the currently playing file → stop
+            if self._current_sound:
+                self._current_sound.stop()
+            self._is_playing = False
+            self._current_sound = None
+            self._refresh_files()
+            self.page.update()
+            return
+
+        # Stop any current playback first
+        if self._is_playing and self._current_sound:
+            self._current_sound.stop()
+            self._current_sound = None
+            self._is_playing = False
+
         self._current_audio = path
-        self._on_play(None)
+
+        try:
+            self._current_sound = playsound(path, block=False)
+            self._is_playing = True
+            self._refresh_files()
+            self.page.update()
+        except Exception as ex:
+            self._snack(f"播放失败: {ex}")
 
     def _on_voice_change(self, e):
         pass  # Voice change no longer needs to load prompts
 
-    # ── Emotion toggle ────────────────────────────────────────
 
-    def _on_emo_toggle(self, e):
-        enabled = self._ck_emo.value
-        self._dd_emo_method.visible = enabled
-        self._row_emo_intensity.visible = enabled
-        self._ck_emo_random.visible = enabled
-        if enabled:
-            self._on_emo_method_change(None)
-        else:
-            self._txt_emo_text.visible = False
-            self._container_emo_vec.visible = False
-            self._btn_emo_audio_file.visible = False
-            self._txt_emo_audio_file.visible = False
-        self.page.update()
 
-    def _on_emo_method_change(self, e):
-        method = int(self._dd_emo_method.value or "0")
-        self._txt_emo_text.visible = method == 3
-        self._container_emo_vec.visible = method == 2
-        self._btn_emo_audio_file.visible = method == 1
-        self._txt_emo_audio_file.visible = method == 1
+    def _on_emo_method_tab_change(self, e):
+        self._emo_method_index = int(e.data[0])
+        self._panel_emo_audio.visible = (self._emo_method_index == 0)
+        self._panel_emo_vec.visible = (self._emo_method_index == 1)
+        self._panel_emo_text.visible = (self._emo_method_index == 2)
         self.page.update()
 
     def _on_emo_vec_change(self, e):
@@ -514,39 +507,39 @@ class TtsApp:
         self._btn_synth.disabled = True
         self._btn_synth.content = "合成中…"
         self._txt_status.value = "正在合成…"
-        self._btn_play.visible = False
-        self._txt_file_info.value = ""
         if self._is_playing:
+            if self._current_sound:
+                self._current_sound.stop()
+                self._current_sound = None
             self._is_playing = False
         self.page.update()
 
         # Build emotion params
         emo_vec: list[float] | None = None
         emo_text: str | None = None
-        emo_control_method = 0
+        # SegmentedButton: "0"=audio(→1), "1"=vector(→2), "2"=text(→3)
+        emo_control_method = self._emo_method_index + 1
 
-        if self._ck_emo.value:
-            emo_control_method = int(self._dd_emo_method.value or "0")
-            if emo_control_method == 3:  # text
-                emo_text = self._txt_emo_text.value.strip() or None
-            elif emo_control_method == 2:  # vector
-                emo_vec = [
-                    self._emo_sliders[i].value for i in range(8)
-                ]
-            # method=1 (audio) and method=0 (none) use defaults
+        if emo_control_method == 3:  # text
+            emo_text = self._txt_emo_text.value.strip() or None
+        elif emo_control_method == 2:  # vector
+            emo_vec = [
+                self._emo_sliders[i].value for i in range(8)
+            ]
+            # method=1 (audio) uses defaults
 
         try:
             req = SynthesizeRequest(
                 input=text.strip(),
                 voice=self._dd_voice.value,
                 sample_rate=int(self._dd_sample_rate.value or "24000"),
-                speed=self._sl_speed.value,
-                gain=self._sl_gain.value,
+                speed=float(self._sl_speed.value or 1.0),
+                gain=float(self._sl_gain.value or 1.0),
                 emo_control_method=emo_control_method,
-                emo_weight=self._sl_emo_weight.value if self._ck_emo.value else 0.6,
+                emo_weight=float(self._sl_emo_weight.value or 0.6),
                 emo_text=emo_text,
                 emo_vec=emo_vec,
-                emo_random=self._ck_emo_random.value if self._ck_emo.value else False,
+                emo_random=self._ck_emo_random.value,
                 interval_silence=int(self._txt_interval_silence.value or "200"),
                 max_text_tokens_per_sentence=int(self._txt_max_tokens.value or "120"),
             )
@@ -557,17 +550,16 @@ class TtsApp:
             self.page.update()
             return
 
-        _client = self.client  # type narrowed by the early-return above
+        _client = self.client
 
         def _run():
-            # 2-second cooldown, then re-enable button
             time.sleep(2)
             self._btn_synth.disabled = False
             self._btn_synth.content = "合成"
             self._safe_page_update()
 
             try:
-                out_dir = Path(self._txt_output.value.strip() or "temp/output")
+                out_dir = Path(self._txt_output.value.strip() or str(get_default_output_dir()))
                 out_dir.mkdir(parents=True, exist_ok=True)
 
                 audio_bytes = _client.synthesize(req)
@@ -578,12 +570,7 @@ class TtsApp:
                 out_path.write_bytes(audio_bytes)
 
                 self._current_audio = str(out_path)
-                size_kb = len(audio_bytes) / 1024
                 self._txt_status.value = f"✓ 已生成: {out_path.name}"
-                self._txt_file_info.value = f"{size_kb:.1f} KB"
-                self._btn_play.visible = True
-                self._btn_play.content = "播放"
-                self._btn_play.icon = ft.Icons.PLAY_ARROW
             except AstraFlowError as ex:
                 self._txt_status.value = f"✗ API错误: {ex}"
                 self._snack(f"合成失败: {ex}")
@@ -598,29 +585,10 @@ class TtsApp:
 
     # ── Playback ──────────────────────────────────────────────
 
-    def _on_play(self, e):
-        if self._is_playing:
-            self._is_playing = False
-            self._btn_play.content = "播放"
-            self._btn_play.icon = ft.Icons.PLAY_ARROW
-            self.page.update()
-            return
-        # Play
-        if not self._current_audio or not Path(self._current_audio).exists():
-            self._snack("没有可播放的音频文件")
-            return
-        try:
-            Thread(target=lambda: playsound(self._current_audio), daemon=True).start()
-            self._is_playing = True
-            self._btn_play.content = "停止"
-            self._btn_play.icon = ft.Icons.STOP
-            self._btn_play.visible = True
-            self.page.update()
-        except Exception as ex:
-            self._snack(f"播放失败: {ex}")
+
 
     def _on_open_output(self, e):
-        out_dir = Path(self._txt_output.value.strip() or "temp/output")
+        out_dir = Path(self._txt_output.value.strip() or str(get_default_output_dir()))
         if not out_dir.exists():
             out_dir.mkdir(parents=True, exist_ok=True)
         _p = str(out_dir)
@@ -662,7 +630,7 @@ class TtsApp:
                 self._api_key = new_key
                 os.environ["MODELVERSE_API_KEY"] = new_key
                 # Write to .env file
-                _env = _get_env_path()
+                _env = get_env_path()
                 lines: list[str] = _env.read_text("utf-8").splitlines() if _env.exists() else []
                 new_lines: list[str] = []
                 found = False
@@ -706,175 +674,12 @@ class TtsApp:
             self._snack("请先配置 API Key")
             return
 
-        # Upload form fields
-        self._txt_voice_name = ft.TextField(
-            label="音色名称", hint_text="例如: 温柔女声",
-            border=ft.InputBorder.OUTLINE, expand=True,
-        )
-        self._txt_speaker_path = ft.TextField(
-            label="参考音频", read_only=True,
-            border=ft.InputBorder.OUTLINE, expand=True,
-        )
-        self._txt_emotion_path = ft.TextField(
-            label="情绪音频 (可选)", read_only=True,
-            border=ft.InputBorder.OUTLINE, expand=True,
-        )
+        # Create voice manager dialog if not exists
+        if self._voice_manager is None:
+            self._voice_manager = VoiceManagerDialog(
+                page=self.page,
+                client=self.client,
+                on_refresh_callback=self._load_data,
+            )
 
-        # Voice list container (will be populated dynamically)
-        self._voice_list_column = ft.Column([], spacing=4)
-        voice_list_container = ft.Container(
-            content=ft.Column([
-                ft.Row([
-                    ft.Text("已上传音色", size=14, weight=ft.FontWeight.W_600),
-                    ft.Container(expand=True),
-                    ft.TextButton("刷新", icon=ft.Icons.REFRESH, on_click=lambda _: self._refresh_voice_list(dlg)),
-                ]),
-                self._voice_list_column,
-            ], spacing=8),
-            padding=ft.Padding(top=8, bottom=4, left=0, right=0),
-        )
-
-        dlg = ft.AlertDialog(
-            title=ft.Text("音色管理"),
-            content=ft.Container(
-                content=ft.Column([
-                    ft.Text("上传新音色", size=14, weight=ft.FontWeight.W_600),
-                    self._txt_voice_name,
-                    ft.Row([
-                        ft.FilledTonalButton(
-                            "选择参考音频", icon=ft.Icons.AUDIO_FILE,
-                            on_click=self._on_pick_speaker_file,
-                        ),
-                        self._txt_speaker_path,
-                    ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    ft.Row([
-                        ft.FilledTonalButton(
-                            "情绪音频(可选)", icon=ft.Icons.MUSIC_NOTE,
-                            on_click=self._on_pick_emotion_file,
-                        ),
-                        self._txt_emotion_path,
-                    ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    ft.Text("限制: MP3/WAV, 5-30秒, ≤20MB, ≥16kHz", size=11, color=ft.Colors.GREY_500),
-                    ft.FilledButton(
-                        "上传音色", icon=ft.Icons.UPLOAD,
-                        on_click=lambda _: self._on_upload_voice(dlg),
-                    ),
-                    ft.Divider(),
-                    voice_list_container,
-                ], spacing=12),
-                width=600,
-                padding=ft.Padding(left=4, top=8, right=4, bottom=8),
-            ),
-        )
-
-        self.page.show_dialog(dlg)
-        self._refresh_voice_list(dlg)
-
-    def _on_pick_speaker_file(self, e):
-        """Open file picker for speaker reference audio."""
-        path = filedialog.askopenfilename(
-            title="选择参考音频文件",
-            filetypes=[
-                ("音频文件", "*.wav *.mp3"),
-                ("所有文件", "*.*"),
-            ],
-        )
-        if path:
-            self._txt_speaker_path.value = path
-            self.page.update()
-
-    def _on_pick_emotion_file(self, e):
-        """Open file picker for emotion reference audio."""
-        path = filedialog.askopenfilename(
-            title="选择情绪音频文件",
-            filetypes=[
-                ("音频文件", "*.wav *.mp3"),
-                ("所有文件", "*.*"),
-            ],
-        )
-        if path:
-            self._txt_emotion_path.value = path
-            self.page.update()
-
-    def _on_upload_voice(self, dlg: ft.AlertDialog):
-        """Upload a custom voice via the API."""
-        name = (self._txt_voice_name.value or "").strip()
-        speaker_path = (self._txt_speaker_path.value or "").strip()
-
-        if not name:
-            self._snack("请输入音色名称")
-            return
-        if not speaker_path or not Path(speaker_path).exists():
-            self._snack("请选择参考音频文件")
-            return
-        if not self.client:
-            self._snack("未连接 API")
-            return
-
-        try:
-            emotion_path = (self._txt_emotion_path.value or "").strip() or None
-            voice_id = self.client.upload_voice(name, speaker_path, emotion_path)
-            self._snack(f"上传成功: {voice_id}")
-
-            # Reset form
-            self._txt_voice_name.value = ""
-            self._txt_speaker_path.value = ""
-            self._txt_emotion_path.value = ""
-
-            # Refresh the voice list in the dialog AND the main dropdown
-            self._refresh_voice_list(dlg)
-            self._load_data()
-        except Exception as ex:
-            logger.error("Voice upload failed: %s", ex)
-            self._snack(f"上传失败: {ex}")
-
-    def _on_delete_voice(self, voice_id: str, dlg: ft.AlertDialog):
-        """Delete a custom voice with confirmation."""
-        if not self.client:
-            return
-
-        confirm_dlg = ft.AlertDialog(
-            title=ft.Text("确认删除"),
-            content=ft.Text(f"确定要删除音色 {voice_id} 吗？\n删除后无法恢复。"),
-            actions=[
-                ft.TextButton("取消", on_click=lambda _: setattr(confirm_dlg, 'open', False)),
-                ft.FilledButton("删除", on_click=lambda _: self._do_delete_voice(voice_id, confirm_dlg, dlg)),
-            ],
-        )
-        self.page.show_dialog(confirm_dlg)
-
-    def _do_delete_voice(self, voice_id: str, confirm_dlg: ft.AlertDialog, manager_dlg: ft.AlertDialog):
-        """Perform the delete after confirmation."""
-        confirm_dlg.open = False
-        try:
-            if self.client and self.client.delete_voice(voice_id):
-                self._snack(f"已删除: {voice_id}")
-                self._refresh_voice_list(manager_dlg)
-                self._load_data()
-        except Exception as ex:
-            logger.error("Voice deletion failed: %s", ex)
-            self._snack(f"删除失败: {ex}")
-
-    def _refresh_voice_list(self, dlg: ft.AlertDialog):
-        """Refresh the voice list inside the manager dialog."""
-        if not self.client:
-            return
-        try:
-            voices = self.client.list_custom_voices()
-            rows = []
-            for v in voices:
-                rows.append(ft.Row([
-                    ft.Text(f"📤 {v.name}", size=13, expand=True),
-                    ft.Text(v.id, size=11, color=ft.Colors.GREY_500, font_family="monospace"),
-                    ft.IconButton(
-                        icon=ft.Icons.DELETE, icon_size=18, tooltip="删除",
-                        on_click=lambda e, vid=v.id: self._on_delete_voice(vid, dlg),
-                    ),
-                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER))
-            if not rows:
-                rows = [ft.Text("（暂无自定义音色）", size=13, color=ft.Colors.GREY_500)]
-            self._voice_list_column.controls = rows
-            self.page.update()
-        except Exception as ex:
-            logger.warning("Failed to refresh voice list: %s", ex)
-            self._snack(f"刷新失败: {ex}")
+        self._voice_manager.open()
