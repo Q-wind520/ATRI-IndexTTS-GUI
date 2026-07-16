@@ -17,6 +17,7 @@ from gui.api_client import (  # noqa: F401
     AstraFlowClient,
     AstraFlowError,
     CustomVoice,
+    EmotionAnalysisResult,
     SynthesizeRequest,
 )
 from gui.utils import EMOTION_DIMS, get_config_dir, get_default_output_dir, get_env_path
@@ -30,10 +31,12 @@ class TtsApp:
     def __init__(self, page: ft.Page):
         self.page = page
 
-        # Load .env and API key
+        # Load .env
         _env = get_env_path()
         if _env.exists():
             load_dotenv(_env)
+
+        # TTS API key
         self._api_key = os.environ.get("MODELVERSE_API_KEY", "")
 
         # Initialize client (will be None if no API key)
@@ -45,12 +48,28 @@ class TtsApp:
                 self._api_key = ""
                 self.client = None
 
+        # LLM config for smart emotion analysis (OpenAI-compatible only)
+        self._llm_api_key: str = os.environ.get("LLM_API_KEY", "")
+        self._llm_model: str = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+        self._llm_base_url: str = os.environ.get(
+            "LLM_BASE_URL", "https://api.modelverse.cn/v1",
+        )
+
         self._current_audio: str | None = None
         self._current_sound: Sound | None = None
         self._is_playing = False
 
         # Voice manager dialog
         self._voice_manager: VoiceManagerDialog | None = None
+
+        # Smart emotion control (initialized in _build_ui)
+        self._btn_intelligent: ft.FilledButton = None  # type: ignore[assignment]
+        self._result_card: ft.Container = None  # type: ignore[assignment]
+        self._emotion_text_display: ft.Text = None  # type: ignore[assignment]
+        self._emotion_intensity_bar: ft.ProgressBar = None  # type: ignore[assignment]
+        self._emotion_intensity_text: ft.Text = None  # type: ignore[assignment]
+        self._vec_mini_bars: list[ft.ProgressBar] = []
+        self._vec_mini_labels: list[ft.Text] = []
 
         self._build_ui()
         self._load_data()
@@ -177,6 +196,81 @@ class TtsApp:
             spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         self._ck_emo_random = ft.Checkbox(label="随机化情感", value=False)
+
+        # ---- Smart Emotion Control (LLM-based) ----
+        self._btn_intelligent = ft.FilledButton(
+            content=ft.Row([
+                ft.Icon(ft.Icons.AUTO_AWESOME, size=18),
+                ft.Text("智能分析情感"),
+            ], spacing=4),
+            style=ft.ButtonStyle(
+                color=ft.Colors.ON_PRIMARY_CONTAINER,
+                bgcolor=ft.Colors.PRIMARY_CONTAINER,
+            ),
+            on_click=self._on_intelligent_control,
+        )
+
+        # (LLM model/provider configured in API config dialog)
+
+        # ---- Result card (initially hidden) ----
+        self._emotion_text_display = ft.Text(
+            "", size=20, weight=ft.FontWeight.BOLD,
+            color=ft.Colors.PRIMARY,
+        )
+
+        self._emotion_intensity_bar = ft.ProgressBar(
+            value=0, width=200, color=ft.Colors.PRIMARY,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+        )
+
+        self._emotion_intensity_text = ft.Text("0.00", size=14, weight=ft.FontWeight.W_500)
+
+        self._vec_mini_bars.clear()
+        self._vec_mini_labels.clear()
+        vec_bar_cells: list[ft.Control] = []
+        for _i, (_en, cn) in enumerate(EMOTION_DIMS):
+            label = ft.Text(cn, size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+            bar = ft.ProgressBar(
+                value=0, color=ft.Colors.TERTIARY,
+                bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+            )
+            self._vec_mini_labels.append(label)
+            self._vec_mini_bars.append(bar)
+            vec_bar_cells.append(
+                ft.Column([
+                    ft.Row([
+                        label,
+                        ft.Text("0.00", size=10, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ], spacing=4),
+                    bar,
+                ], spacing=2, col={"sm": 3, "md": 3}),
+            )
+
+        self._result_card = ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon(ft.Icons.AUTO_AWESOME, color=ft.Colors.PRIMARY, size=24),
+                    ft.Text("AI 情感分析结果", size=15, weight=ft.FontWeight.W_600),
+                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Divider(height=4),
+                ft.Row([
+                    ft.Text("情感标签：", size=13, weight=ft.FontWeight.W_500),
+                    self._emotion_text_display,
+                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Row([
+                    ft.Text("情感强度：", size=13, weight=ft.FontWeight.W_500),
+                    self._emotion_intensity_bar,
+                    self._emotion_intensity_text,
+                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Text("情感向量各维度：", size=13, weight=ft.FontWeight.W_500),
+                ft.ResponsiveRow(vec_bar_cells, spacing=8),
+            ], spacing=8),
+            padding=16,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            border=ft.Border.all(width=1, color=ft.Colors.OUTLINE_VARIANT),
+            border_radius=12,
+            visible=False,
+        )
 
         # ---- Advanced parameters (collapsible, includes audio) ----
         self._txt_speed_val = ft.Text("1.00", size=14, width=44, text_align=ft.TextAlign.END)
@@ -308,6 +402,8 @@ class TtsApp:
                         ], spacing=12),
                         self._btn_manage_voices,
                         ft.Text("情感控制", size=15, weight=ft.FontWeight.W_600),
+                        self._btn_intelligent,
+                        self._result_card,
                         self._seg_emo_method,
                         self._container_emo_vec,
                         self._panel_emo_audio,
@@ -482,6 +578,115 @@ class TtsApp:
             self._txt_emo_audio_file.value = path
             self.page.update()
 
+    # ── Smart Emotion Control ─────────────────────────────────
+
+    def _on_intelligent_control(self, e):
+        """Analyze synthesis text emotion via LLM and auto-populate controls."""
+        text = self._txt_text.value
+        if not text or not text.strip():
+            self._snack("请先输入合成文本")
+            return
+        if not self.client:
+            self._snack("请先配置 TTS API Key")
+            return
+
+        llm_api_key = self._llm_api_key
+        llm_base_url = self._llm_base_url
+        if not llm_api_key:
+            self._snack(
+                "请先配置 LLM API Key（设置 → API 配置 → 情感分析 LLM 配置）",
+            )
+            return
+        if not llm_base_url:
+            self._snack(
+                "请先配置 LLM API 地址（设置 → API 配置 → 情感分析 LLM 配置）",
+            )
+            return
+
+        # Loading state (UI thread — safe)
+        self._btn_intelligent.disabled = True
+        self._btn_intelligent.content = ft.Row([
+            ft.ProgressRing(width=16, height=16, stroke_width=2),
+            ft.Text("正在分析…"),
+        ], spacing=8)
+        self._result_card.visible = False
+        self.page.update()
+
+        model = self._llm_model
+        _client = self.client
+
+        def _run():
+            try:
+                result = _client.analyze_emotion(
+                    text.strip(), model=model,
+                    api_key=llm_api_key,
+                    base_url=llm_base_url,
+                )
+
+                # All UI updates MUST go through UI thread
+                def _update_ui():
+                    self._emotion_text_display.value = result.emotion_text
+                    self._emotion_intensity_bar.value = result.emotion_intensity
+                    self._emotion_intensity_text.value = f"{result.emotion_intensity:.2f}"
+                    for i, val in enumerate(result.emotion_vector):
+                        self._vec_mini_bars[i].value = val
+                        self._vec_mini_labels[i].value = (
+                            f"{EMOTION_DIMS[i][1]} {val:.2f}"
+                        )
+                    self._result_card.visible = True
+                    self._auto_populate_emotion(result)
+
+                self._run_on_ui_thread(_update_ui)
+
+            except AstraFlowError as ex:
+                self._run_on_ui_thread(lambda: self._snack(f"智能分析失败: {ex}"))
+
+            except Exception as ex:
+                logger.exception("Smart emotion analysis failed")
+                self._run_on_ui_thread(lambda: self._snack(f"分析出错: {ex}"))
+
+            finally:
+                def _reset_btn():
+                    self._btn_intelligent.disabled = False
+                    self._btn_intelligent.content = ft.Row([
+                        ft.Icon(ft.Icons.AUTO_AWESOME, size=18),
+                        ft.Text("智能分析情感"),
+                    ], spacing=4)
+                    self.page.update()
+                self._run_on_ui_thread(_reset_btn)
+
+        Thread(target=_run, daemon=True).start()
+
+    def _auto_populate_emotion(self, result: EmotionAnalysisResult) -> None:
+        """Fill existing emotion controls with LLM analysis result.
+
+        Must be called on UI thread (via _safe_page_update).
+        """
+        # Switch to vector mode so user sees the sliders
+        self._emo_method_index = 1
+        self._seg_emo_method.selected = ["1"]
+        self._panel_emo_audio.visible = False
+        self._panel_emo_vec.visible = True
+        self._panel_emo_text.visible = False
+
+        # Fill vector sliders
+        for i, val in enumerate(result.emotion_vector):
+            clipped = min(val, 1.2)  # slider max is 1.2
+            self._emo_sliders[i].value = clipped
+            self._emo_val_texts[i].value = f"{clipped:.2f}"
+
+        # Update vector sum display
+        total = sum(result.emotion_vector)
+        self._txt_emo_vec_sum.value = f"合计: {total:.2f}"
+        self._txt_emo_vec_sum.color = ft.Colors.RED if total > 1.5 else None
+
+        # Set emotion intensity
+        self._sl_emo_weight.value = result.emotion_intensity
+        self._txt_emo_weight_val.value = f"{result.emotion_intensity:.2f}"
+
+        # Fill emotion text field
+        self._txt_emo_text.value = result.emotion_text
+
     # ── Advanced toggle ───────────────────────────────────────
 
     def _on_advanced_toggle(self, e):
@@ -602,6 +807,7 @@ class TtsApp:
     # ── Config dialog ─────────────────────────────────────────
 
     def _open_config_dialog(self, e):
+        # ── TTS section ──
         txt_key = ft.TextField(
             label="MODELVERSE_API_KEY",
             password=True,
@@ -611,44 +817,152 @@ class TtsApp:
             expand=True,
         )
 
-        info_text = ft.Text(
-            "前往 https://astraflow.ucloud.cn/ 注册并获取 API Key",
+        tts_info = ft.Text(
+            "前往 https://astraflow.ucloud.cn/ 注册并获取 TTS API Key",
             size=12, color=ft.Colors.GREY_600,
+        )
+
+        # ── LLM section (OpenAI-compatible only) ──
+        llm_section_title = ft.Text(
+            "情感分析 LLM 配置（OpenAI 兼容）", size=14, weight=ft.FontWeight.W_600,
+        )
+
+        # Preset quick-select: fills the URL field
+        dd_url_preset = ft.Dropdown(
+            label="接口预设",
+            options=[
+                ft.dropdown.Option("openai", "OpenAI  —  api.openai.com"),
+                ft.dropdown.Option("astraflow", "AstraFlow  —  api.modelverse.cn"),
+                ft.dropdown.Option("custom", "自定义"),
+            ],
+            value="custom",
+            border=ft.InputBorder.OUTLINE,
+            width=280,
+        )
+
+        txt_llm_url = ft.TextField(
+            label="API 地址",
+            value=self._llm_base_url,
+            hint_text="OpenAI 兼容接口的完整 URL",
+            border=ft.InputBorder.OUTLINE,
+            expand=True,
+        )
+
+        txt_llm_key = ft.TextField(
+            label="LLM API Key",
+            password=True,
+            value=self._llm_api_key,
+            hint_text="输入 LLM 服务商的 API Key",
+            border=ft.InputBorder.OUTLINE,
+            expand=True,
+        )
+
+        txt_llm_model = ft.TextField(
+            label="模型名称",
+            value=self._llm_model,
+            hint_text="例: gpt-4o-mini, deepseek-chat, qwen-plus",
+            border=ft.InputBorder.OUTLINE,
+            expand=True,
+        )
+
+        def _apply_preset(preset: str):
+            if preset == "openai":
+                txt_llm_url.value = "https://api.openai.com/v1"
+            elif preset == "astraflow":
+                txt_llm_url.value = "https://api.modelverse.cn/v1"
+            # "custom" — leave as-is
+
+        def _on_url_preset_change(ev):
+            _apply_preset(dd_url_preset.value)
+            self.page.update()
+
+        dd_url_preset.on_change = _on_url_preset_change
+
+        # Set initial preset based on current URL
+        _base = self._llm_base_url.rstrip("/")
+        if "api.openai.com" in _base:
+            dd_url_preset.value = "openai"
+        elif "api.modelverse.cn" in _base:
+            dd_url_preset.value = "astraflow"
+        else:
+            dd_url_preset.value = "custom"
+
+        llm_hint = ft.Text(
+            "选择预设快速填入接口地址，也可手动输入任意 OpenAI 兼容地址。",
+            size=11, color=ft.Colors.GREY_600,
         )
 
         dlg = ft.AlertDialog(
             title=ft.Text("API 配置"),
             content=ft.Container(
-                content=ft.Column([info_text, txt_key], tight=True, spacing=12),
+                content=ft.Column([
+                    tts_info,
+                    txt_key,
+                    ft.Divider(height=8),
+                    llm_section_title,
+                    ft.Row([dd_url_preset, txt_llm_url], spacing=8,
+                           vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    txt_llm_key,
+                    txt_llm_model,
+                    llm_hint,
+                ], tight=True, spacing=10, scroll=ft.ScrollMode.AUTO),
                 padding=ft.Padding(left=0, top=4, right=0, bottom=4),
+                width=540,
             ),
         )
 
+        def _write_env_var(lines: list[str], key: str, value: str) -> list[str]:
+            """Update or append a KEY=VALUE pair in env lines."""
+            new_lines: list[str] = []
+            found = False
+            for line in lines:
+                if line.strip().startswith(f"{key}="):
+                    new_lines.append(f"{key}={value}")
+                    found = True
+                else:
+                    new_lines.append(line)
+            if not found:
+                new_lines.append(f"{key}={value}")
+            return new_lines
+
         def _on_save(_ev):
+            _env = get_env_path()
+            lines: list[str] = _env.read_text("utf-8").splitlines() if _env.exists() else []
+
+            # Save TTS key
             new_key = txt_key.value.strip()
             if new_key:
                 self._api_key = new_key
                 os.environ["MODELVERSE_API_KEY"] = new_key
-                # Write to .env file
-                _env = get_env_path()
-                lines: list[str] = _env.read_text("utf-8").splitlines() if _env.exists() else []
-                new_lines: list[str] = []
-                found = False
-                for line in lines:
-                    if line.strip().startswith("MODELVERSE_API_KEY="):
-                        new_lines.append(f"MODELVERSE_API_KEY={new_key}")
-                        found = True
-                    else:
-                        new_lines.append(line)
-                if not found:
-                    new_lines.append(f"MODELVERSE_API_KEY={new_key}")
-                _env.write_text("\n".join(new_lines) + "\n", "utf-8")
+                lines = _write_env_var(lines, "MODELVERSE_API_KEY", new_key)
 
                 # Recreate client
                 try:
                     self.client = AstraFlowClient(new_key)
                 except Exception:
                     self.client = None
+
+            # Save LLM config (always OpenAI-compatible, independent key)
+            llm_key = txt_llm_key.value.strip()
+            llm_model = txt_llm_model.value.strip() or "gpt-4o-mini"
+            llm_url = txt_llm_url.value.strip()
+            # Normalize: OpenAI-compatible APIs need /v1 path prefix
+            if llm_url and not llm_url.rstrip("/").endswith("/v1"):
+                llm_url = llm_url.rstrip("/") + "/v1"
+
+            self._llm_api_key = llm_key
+            self._llm_model = llm_model
+            self._llm_base_url = llm_url
+
+            os.environ["LLM_API_KEY"] = llm_key
+            os.environ["LLM_MODEL"] = llm_model
+            os.environ["LLM_BASE_URL"] = llm_url
+
+            lines = _write_env_var(lines, "LLM_API_KEY", llm_key)
+            lines = _write_env_var(lines, "LLM_MODEL", llm_model)
+            lines = _write_env_var(lines, "LLM_BASE_URL", llm_url)
+
+            _env.write_text("\n".join(lines) + "\n", "utf-8")
 
             dlg.open = False
             self._load_data()
@@ -665,7 +979,7 @@ class TtsApp:
 
     def _snack(self, msg: str):
         self.page.snack_bar = ft.SnackBar(content=ft.Text(msg), open=True)
-        self._safe_page_update()
+        self.page.update()
 
     # ── Voice Manager ──────────────────────────────────────────
 

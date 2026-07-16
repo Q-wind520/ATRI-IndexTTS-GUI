@@ -7,6 +7,7 @@ request/response dataclasses.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -107,6 +108,26 @@ class CustomVoice:
     name: str
 
 
+@dataclass
+class EmotionAnalysisResult:
+    """Result from LLM-based text emotion analysis."""
+
+    emotion_text: str  # Chinese emotion label, e.g. "愉悦兴奋"
+    emotion_intensity: float  # 0.0 – 1.0
+    emotion_vector: list[float]  # 8-dim, sum ≤ 0.9 (to preserve voice timbre)
+
+    def __post_init__(self) -> None:
+        if len(self.emotion_vector) != 8:
+            raise ValueError(
+                f"emotion_vector must have 8 elements, got {len(self.emotion_vector)}"
+            )
+        total = sum(self.emotion_vector)
+        if total > 0.9:
+            ratio = 0.9 / total
+            self.emotion_vector = [round(v * ratio, 4) for v in self.emotion_vector]
+        self.emotion_intensity = max(0.0, min(1.0, self.emotion_intensity))
+
+
 # ── Client ──────────────────────────────────────────────────────────
 
 
@@ -161,6 +182,128 @@ class AstraFlowClient:
         body = req.to_api_dict()
         resp = self._request("POST", "/audio/speech", json=body)
         return resp.content
+
+    def analyze_emotion(
+        self,
+        text: str,
+        model: str = "gpt-4o-mini",
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ) -> EmotionAnalysisResult:
+        """Analyze the emotion of given text using an LLM.
+
+        Calls an OpenAI-compatible chat/completions endpoint with a
+        structured JSON output prompt.
+
+        When ``api_key`` and ``base_url`` are provided, uses those for
+        the LLM provider (e.g. separate OpenAI key).  Otherwise falls
+        back to this client's own AstraFlow credentials.
+
+        Returns an ``EmotionAnalysisResult`` with emotion text label,
+        intensity (0–1), and 8-dimension emotion vector.
+        """
+        logger.info("Analyzing emotion for %d chars with model=%s", len(text), model)
+
+        system_prompt = (
+            "你是一个专业的情感分析助手。请分析给定中文文本的情感特征，返回严格的JSON格式。\n\n"
+            "分析规则：\n"
+            "1. emotion_text: 用1-3个中文词描述主要情感，如「愉悦兴奋」「悲伤忧郁」「愤怒不满」\n"
+            "2. emotion_intensity: 情感强度，0.0（平静）到1.0（非常强烈）\n"
+            "3. emotion_vector: 8维向量，依次为 [快乐, 愤怒, 悲伤, 恐惧, 厌恶, 抑郁, 惊讶, 平静]，"
+            "每维0.0-1.0，所有维度总和必须≤0.9（情感总和过高会导致音色失真）\n\n"
+            "返回格式必须为：\n"
+            '{"emotion_text": "愉悦", "emotion_intensity": 0.6, '
+            '"emotion_vector": [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2]}'
+        )
+
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+            "temperature": 0.3,
+            "response_format": {"type": "json_object"},
+        }
+
+        # Use provided LLM credentials, or fallback to this client's own
+        _api_key = api_key or self._api_key
+        _base_url = (base_url or self._base_url).rstrip("/")
+        # OpenAI-compatible APIs require /v1 prefix before /chat/completions
+        if not _base_url.endswith("/v1"):
+            _base_url += "/v1"
+
+        if base_url is not None or api_key is not None:
+            # Different LLM provider — make a direct request
+            _client = httpx.Client(
+                base_url=_base_url,
+                headers={"Authorization": f"Bearer {_api_key}"},
+                timeout=httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
+            )
+            try:
+                resp = _client.post("/chat/completions", json=body)
+                if not resp.is_success:
+                    try:
+                        err_data = resp.json()
+                        msg = err_data.get("message") or err_data.get("error", {}).get("message") or resp.text
+                    except ValueError:
+                        msg = resp.text
+                    raise AstraFlowError(msg, status_code=resp.status_code)
+                data = resp.json()
+            finally:
+                _client.close()
+        else:
+            resp = self._request("POST", "/chat/completions", json=body)
+            data = resp.json()
+
+        try:
+            content_str: str = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise AstraFlowError(
+                f"LLM returned unexpected response structure: {exc}",
+            ) from exc
+
+        try:
+            parsed: dict[str, Any] = json.loads(content_str)
+        except json.JSONDecodeError as exc:
+            logger.error("LLM returned invalid JSON: %s", content_str)
+            raise AstraFlowError(f"LLM returned invalid JSON: {exc}") from exc
+
+        emotion_text: str | None = parsed.get("emotion_text")
+        emotion_intensity: Any = parsed.get("emotion_intensity")
+        emotion_vector: Any = parsed.get("emotion_vector")
+
+        if not emotion_text or not isinstance(emotion_text, str):
+            raise AstraFlowError(
+                "LLM analysis missing or invalid 'emotion_text' field",
+            )
+        if emotion_intensity is None or not isinstance(emotion_intensity, (int, float)):
+            raise AstraFlowError(
+                "LLM analysis missing or invalid 'emotion_intensity' field",
+            )
+        if not emotion_vector or not isinstance(emotion_vector, list):
+            raise AstraFlowError(
+                "LLM analysis missing or invalid 'emotion_vector' field",
+            )
+
+        try:
+            result = EmotionAnalysisResult(
+                emotion_text=emotion_text,
+                emotion_intensity=float(emotion_intensity),
+                emotion_vector=[float(v) for v in emotion_vector],
+            )
+        except (ValueError, TypeError) as exc:
+            raise AstraFlowError(
+                f"LLM returned invalid emotion values: {exc}",
+            ) from exc
+
+        logger.info(
+            "Emotion analysis result: text=%s intensity=%.2f vector=%s",
+            result.emotion_text,
+            result.emotion_intensity,
+            result.emotion_vector,
+        )
+        return result
 
     def list_custom_voices(self) -> list[CustomVoice]:
         """List all custom uploaded voices."""
